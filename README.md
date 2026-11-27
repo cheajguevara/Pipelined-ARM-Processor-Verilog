@@ -41,9 +41,9 @@ The core features full hardware handling of structural, data, and control hazard
 - **Load-Use Hazard Detection**: Detects RAW data dependencies following `LDR` instructions, automatically freezing `PC` and `IF/ID` stage registers while inserting a bubble into `ID/EX`.
 - **Branch Penalty Minimization**: Branch evaluation in the `EX` stage with a 2-cycle flush mechanism clearing speculatively fetched instructions on branch taken.
 - **Architectural Condition Code Evaluator**: Full support for 15 ARM condition codes (`EQ`, `NE`, `CS/HS`, `CC/LO`, `MI`, `PL`, `VS`, `VC`, `HI`, `LS`, `GE`, `LT`, `GT`, `LE`, `AL`) against `NZCV` flags.
-- **Flexible Shifter Operand (Barrel Shifter)**: Hardware generator supporting 32-bit rotated immediates ($8\text{-bit immediate} \ \text{ROR} \ 2 \times \text{rotate\_imm}$) and register shifts (`LSL`, `LSR`, `ASR`, `ROR`).
+- **Flexible Shifter Operand (Barrel Shifter)**: Supports an 8-bit immediate rotated right by `2 * rotate_imm`, and register shifts (`LSL`, `LSR`, `ASR`, `ROR`).
 - **Multi-Cycle SRAM Controller**: 3-state Finite State Machine (`IDLE`, `WORK`, `DONE`) managing 4-cycle sequential byte access over an 8-bit bidirectional memory bus with `cpu_ready` handshaking.
-- **Banked Register File**: 16 $\times$ 32-bit registers ($R_0 - R_{15}$) featuring dual asynchronous read ports and negative-edge synchronous writing to prevent write-after-read hazards within the same clock cycle.
+- **Banked Register File**: 16 32-bit registers (`R0`–`R15`) featuring dual asynchronous read ports and negative-edge synchronous writing to prevent write-after-read hazards within the same clock cycle.
 - **Hardware Verified**: Board-level wrapper with debounce filtering and Integrated Logic Analyzer (ILA) real-time hardware probing on Xilinx Zynq-7000 FPGA.
 
 ---
@@ -111,7 +111,7 @@ graph TD
 ### 1. Instruction Fetch (IF)
 - **Program Counter (`pc.v`)**: 32-bit synchronous register with asynchronous active-high reset and freeze control.
 - **PC Increment Adder (`adder.v`)**: Adds `32'd1` each cycle (word-aligned addressing in local memory model).
-- **Branch Multiplexer (`mux2to1.v`)**: Selects between sequential $\text{PC}+1$ and branch target address computed in the `EX` stage.
+- **Branch Multiplexer (`mux2to1.v`)**: Selects between sequential `PC + 1` and the branch target address computed in the `EX` stage.
 - **Pipeline Freeze Support**: Holds the current PC value unconditionally whenever `hazard_detected` or `~sram_ready` is asserted.
 
 <p align="center">
@@ -123,7 +123,7 @@ graph TD
 
 ### 2. Instruction Decode & Register File (ID)
 - **Control Unit (`controller.v`)**: Decodes 4-bit Opcode, 2-bit Mode, and S-bit to emit 9-bit execution and pipeline control words (`wb_en`, `mem_r_en`, `mem_w_en`, `b`, `s_out`, `exe_cmd`).
-- **Banked Register File (`register_file.v`)**: $16 \times 32$-bit register array ($R_0-R_{15}$). Writes occur on `negedge clk` while reads are asynchronous (`assign reg1 = rf[src1]`), eliminating intra-cycle RAW structural races.
+- **Banked Register File (`register_file.v`)**: A 16-register, 32-bit register array (`R0`–`R15`). Writes occur on `negedge clk` while reads are asynchronous (`assign reg1 = rf[src1]`), eliminating intra-cycle RAW structural races.
 - **Condition Evaluator (`condition_check.v`)**: Asserts `cond_met` based on active status flags (`Z`, `C`, `N`, `V`). If the condition fails, the instruction is converted into a pipeline `NOP` via bubble injection.
 - **Second Source Selector (`mux2to1_4.v`)**: Selects register index $R_m$ (`Inst[3:0]`) for data-processing operations, or register index $R_d$ (`Inst[15:12]`) for store operations (`STR`), since $R_d$ serves as the data source to be written to memory.
 
@@ -136,15 +136,15 @@ graph TD
 
 ### 3. Execution & Arithmetic Logic Unit (EX)
 - **32-bit ALU (`alu.v`)**: Supports arithmetic (`ADD`, `ADC`, `SUB`, `SBC`), logical (`AND`, `ORR`, `EOR`, `MOV`, `MVN`), and comparison operations (`CMP`, `TST`). Computes condition flags:
-  $$\text{Zero Flag } (Z) = (\text{ALU\_Res} == 0)$$
-  $$\text{Negative Flag } (N) = \text{ALU\_Res}[31]$$
-  $$\text{Carry Flag } (C) = \text{Carry-out of addition/subtraction}$$
-  $$\text{Overflow Flag } (V) = (\sim V_1[31] \land \sim V_2[31] \land R[31]) \lor (V_1[31] \land V_2[31] \land \sim R[31])$$
+  - **Zero (`Z`)**: Set when `alu_res == 0`.
+  - **Negative (`N`)**: The most significant result bit, `alu_res[31]`.
+  - **Carry (`C`)**: The carry output of addition or subtraction.
+  - **Overflow (`V`)**: Indicates signed overflow in arithmetic operations.
 - **Val2 Generator (`val2_generator.v`)**: Implements flexible shifter operand hardware:
-  - Immediate mode ($I=1$): 8-bit immediate rotated right by $2 \times \text{rotate\_imm}$.
+  - Immediate mode (`I=1`): 8-bit immediate rotated right by `2 * rotate_imm`.
   - Memory offset mode: 12-bit immediate zero-extended.
-  - Register shift mode ($I=0$): `LSL` (00), `LSR` (01), `ASR` (10, using `$signed`), `ROR` (11).
-- **Branch Target Adder (`adder.v`)**: Computes $\text{Branch Target} = \text{PC} + \text{SignExtended}(\text{Imm24})$.
+  - Register shift mode (`I=0`): `LSL` (00), `LSR` (01), `ASR` (10, using `$signed`), `ROR` (11).
+- **Branch Target Adder (`adder.v`)**: Computes `branch target = PC + sign-extended Imm24`.
 
 <p align="center">
   <img src="docs/figures/exe_stage_waveform.png" alt="EXE Stage Waveform" width="85%"><br>
@@ -329,7 +329,7 @@ The processor and FPGA debugging wrapper (`ARM_wrapper`, instantiating `ARM_inst
 </p>
 
 ### Synthesis & Hardware Verification Notes
-- **Simulation Clocking**: Cycle-accurate ModelSim verification executes the 47-instruction test program at $T_{\text{clk}} = 10\text{ ns}$ ($100\text{ MHz}$ testbench clock).
+- **Simulation Clocking**: Cycle-accurate ModelSim verification executes the 47-instruction test program with a 10 ns clock period (100 MHz testbench clock).
 - **On-Board Bring-Up**: Physical board bring-up pairs `debouncer.v` pushbutton conditioning with Xilinx `VIO` probes on Zynq-7000.
 
 <p align="center">
@@ -680,5 +680,7 @@ ARMv4T-compatible instruction subset.
 
 阿杰·库马尔·达什与吉特哈布代码助手合作开发了此设计，仍需进一步研究。
 
-🎸 ✈️ 🇨🇳 ❤️ 😴 😴
+🎸 ✈️ ❤️ 😴 😴
+
+<img src="docs/figures/china_flag.svg" alt="Flag of China" width="96" height="96">
 
