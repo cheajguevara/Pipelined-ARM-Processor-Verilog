@@ -1,0 +1,45 @@
+# Generated simulation and firmware build products
+/sim/build/
+obj_dir/
+*.vcd
+*.fst
+
+# ModelSim / Questa
+/sim/modelsim.ini
+work/
+transcript
+vsim.wlf
+*.mti
+*.mpf
+*.cr.mti
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Xilinx Vivado
+*.jou
+*.log
+*.pb
+*.wdb
+*.vds
+*.dcp
+*.rpt
+*.str
+*.xpr
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/
+*.cache/
+*.hw/
+.Xil/
+hd_visual/
+
+# OS & Editor artifacts
+.DS_Store
+Thumbs.db
+*~
+*.swp
+.vscode/
+.idea/

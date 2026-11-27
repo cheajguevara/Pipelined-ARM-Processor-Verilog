@@ -1,0 +1,514 @@
+# 5-Stage Pipelined ARM Processor in Verilog HDL
+### Hardware Implementation with Dynamic Forwarding, Hazard Detection, and Multi-Cycle SRAM Controller
+
+[![Verilog-2001](https://img.shields.io/badge/HDL-Verilog--2001-blue.svg)](https://en.wikipedia.org/wiki/Verilog)
+[![EDA Tool](https://img.shields.io/badge/EDA-Xilinx%20Vivado%20%7C%20ModelSim-red.svg)](https://www.xilinx.com/products/design-tools/vivado.html)
+[![FPGA Target](https://img.shields.io/badge/FPGA-Xilinx%20Zynq--7000%20(XC7Z010)-orange.svg)](https://www.xilinx.com/products/silicon-devices/soc/zynq-7000.html)
+[![Synthesis](https://img.shields.io/badge/Synthesis-Vivado%20Verified-brightgreen.svg)](#fpga-implementation--synthesis-results)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Institution](https://img.shields.io/badge/University%20of%20Tehran-ECE%20Department-003366.svg)](https://ece.ut.ac.ir/)
+
+A high-performance, synthesizable **32-bit 5-Stage Pipelined RISC Processor** implementing an **ARMv4T-compatible integer instruction set** in Verilog HDL. Designed and verified as part of the **Computer Architecture Laboratory** at the **Department of Electrical and Computer Engineering, University of Tehran**, supervised by **Dr. Saeed Safari**.
+
+The core features full hardware handling of structural, data, and control hazards via a **Dynamic Operand Forwarding Unit** (zero-bubble bypassing from EX/MEM and MEM/WB stages) and a **Load-Use Hazard Detection Unit**. To interface with narrow physical memories, a multi-cycle **SRAM Controller FSM** transparently serializes 32-bit word transactions into 4 sequential 8-bit byte bursts with automated pipeline freezing. Physical implementation of the full board wrapper (`ARM_wrapper`, including the processor core, VIO core, and debouncer) on a **Xilinx Zynq-7000 SoC (XC7Z010)** uses **1,567 Slice LUTs (8.90%)**, **1,152 Slice Flip-Flops (3.27%)**, and **0.50 BRAM tiles (0.83%)**.
+
+---
+
+## Table of Contents
+- [Architectural Highlights](#architectural-highlights)
+- [System Architecture & Datapath](#system-architecture--datapath)
+- [Pipeline Stage Details](#pipeline-stage-details)
+  - [1. Instruction Fetch (IF)](#1-instruction-fetch-if)
+  - [2. Instruction Decode & Register File (ID)](#2-instruction-decode--register-file-id)
+  - [3. Execution & Arithmetic Logic Unit (EX)](#3-execution--arithmetic-logic-unit-ex)
+  - [4. Memory Access & SRAM Controller (MEM)](#4-memory-access--sram-controller-mem)
+  - [5. Write-Back (WB)](#5-write-back-wb)
+- [Hazard Resolution & Dynamic Forwarding](#hazard-resolution--dynamic-forwarding)
+- [Multi-Cycle SRAM Subsystem](#multi-cycle-sram-subsystem)
+- [Empirical Benchmarks & Speedup](#empirical-benchmarks--speedup)
+- [FPGA Implementation & Synthesis Results](#fpga-implementation--synthesis-results)
+- [Repository Structure](#repository-structure)
+- [Verification & Simulation Guide](#verification--simulation-guide)
+- [خلاصه معماری به زبان فارسی (Persian Overview)](#خلاصه-معماری-به-زبان-فارسی-persian-overview)
+- [Author & License](#author--license)
+
+---
+
+## Architectural Highlights
+
+- **Classic 5-Stage RISC Pipeline**: Instruction Fetch (`IF`), Instruction Decode (`ID`), Execution (`EX`), Memory Access (`MEM`), and Write-Back (`WB`).
+- **Dynamic Operand Forwarding**: Resolves Read-After-Write (RAW) data hazards across both EX/MEM and MEM/WB pipeline stages with dynamic priority routing (MEM stage prioritised over WB stage).
+- **Load-Use Hazard Detection**: Detects RAW data dependencies following `LDR` instructions, automatically freezing `PC` and `IF/ID` stage registers while inserting a bubble into `ID/EX`.
+- **Branch Penalty Minimization**: Branch evaluation in the `EX` stage with a 2-cycle flush mechanism clearing speculatively fetched instructions on branch taken.
+- **Architectural Condition Code Evaluator**: Full support for 15 ARM condition codes (`EQ`, `NE`, `CS/HS`, `CC/LO`, `MI`, `PL`, `VS`, `VC`, `HI`, `LS`, `GE`, `LT`, `GT`, `LE`, `AL`) against `NZCV` flags.
+- **Flexible Shifter Operand (Barrel Shifter)**: Hardware generator supporting 32-bit rotated immediates ($8\text{-bit immediate} \ \text{ROR} \ 2 \times \text{rotate\_imm}$) and register shifts (`LSL`, `LSR`, `ASR`, `ROR`).
+- **Multi-Cycle SRAM Controller**: 3-state Finite State Machine (`IDLE`, `WORK`, `DONE`) managing 4-cycle sequential byte access over an 8-bit bidirectional memory bus with `cpu_ready` handshaking.
+- **Banked Register File**: 16 $\times$ 32-bit registers ($R_0 - R_{15}$) featuring dual asynchronous read ports and negative-edge synchronous writing to prevent write-after-read hazards within the same clock cycle.
+- **Hardware Verified**: Board-level wrapper with debounce filtering and Integrated Logic Analyzer (ILA) real-time hardware probing on Xilinx Zynq-7000 FPGA.
+
+---
+
+## System Architecture & Datapath
+
+```mermaid
+graph TD
+    subgraph IF_STAGE ["1. Instruction Fetch (IF)"]
+        PC["Program Counter (PC)"] -->|PC Address| IMEM["Instruction Memory"]
+        PC -->|PC| ADD1["Adder (PC + 1)"]
+        ADD1 -->|PC+1| MUX_PC{"PC MUX"}
+        BR_TARGET["Branch Target Address"] -->|Branch Address| MUX_PC
+        MUX_PC -->|Next PC| PC
+    end
+
+    subgraph ID_STAGE ["2. Instruction Decode (ID)"]
+        IF_ID_REG["IF/ID Pipeline Register"] -->|Instruction| CTRL["Control Unit"]
+        IF_ID_REG -->|Rn, Rm, Rd| RF["16x32 Register File"]
+        IF_ID_REG -->|Condition Field| COND_CHK["Condition Evaluator"]
+        CTRL -->|Micro-ops| BUBBLE_MUX{"Bubble MUX"}
+        COND_CHK -->|Condition Met| BUBBLE_MUX
+    end
+
+    subgraph EX_STAGE ["3. Execution (EX)"]
+        ID_EX_REG["ID/EX Pipeline Register"] -->|Val Rn| FWD_MUX_A{"Forward MUX A"}
+        ID_EX_REG -->|Val Rm| FWD_MUX_B{"Forward MUX B"}
+        FWD_MUX_B --> VAL2_GEN["Val2 / Shifter Generator"]
+        FWD_MUX_A --> ALU["32-bit ALU"]
+        VAL2_GEN --> ALU
+        ALU -->|NZCV Flags| SR["Status Register"]
+        ID_EX_REG -->|PC, Signed Imm24| BR_ADD["Branch Adder"]
+        BR_ADD -->|Branch Target| BR_TARGET
+    end
+
+    subgraph MEM_STAGE ["4. Memory Access (MEM)"]
+        EX_MEM_REG["EX/MEM Pipeline Register"] -->|Address, Write Data| SRAM_CTRL["SRAM Controller FSM"]
+        SRAM_CTRL <-->|8-bit DataIO| SRAM_CHIP["2KB External SRAM"]
+        SRAM_CTRL -->|cpu_ready| HAZARD_UNIT["Hazard Detection Unit"]
+    end
+
+    subgraph WB_STAGE ["5. Write-Back (WB)"]
+        MEM_WB_REG["MEM/WB Pipeline Register"] -->|ALU Result, Mem Read Val| WB_MUX{"WB MUX"}
+        WB_MUX -->|Write-Back Data| RF
+    end
+
+    FWD_UNIT["Forwarding Unit"] -.->|sel_src1| FWD_MUX_A
+    FWD_UNIT -.->|sel_src2| FWD_MUX_B
+    EX_MEM_REG -.->|Forward from MEM| FWD_UNIT
+    MEM_WB_REG -.->|Forward from WB| FWD_UNIT
+
+    HAZARD_UNIT -.->|Freeze PC & IF/ID| IF_STAGE
+    HAZARD_UNIT -.->|Inject Bubble| ID_STAGE
+```
+
+<p align="center">
+  <img src="docs/figures/arm_architecture_overview.png" alt="ARM Architecture Overview" width="85%"><br>
+  <em>Figure 1: Complete 5-Stage Pipelined ARM Processor Datapath with Forwarding and Hazard Detection.</em>
+</p>
+
+---
+
+## Pipeline Stage Details
+
+### 1. Instruction Fetch (IF)
+- **Program Counter (`pc.v`)**: 32-bit synchronous register with asynchronous active-high reset and freeze control.
+- **PC Increment Adder (`adder.v`)**: Adds `32'd1` each cycle (word-aligned addressing in local memory model).
+- **Branch Multiplexer (`mux2to1.v`)**: Selects between sequential $\text{PC}+1$ and branch target address computed in the `EX` stage.
+- **Pipeline Freeze Support**: Holds the current PC value unconditionally whenever `hazard_detected` or `~sram_ready` is asserted.
+
+<p align="center">
+  <img src="docs/figures/if_stage_waveform.png" alt="IF Stage Waveform" width="85%"><br>
+  <em>Figure 2: Cycle-accurate simulation of the IF stage showing sequential PC increments and branch redirection.</em>
+</p>
+
+---
+
+### 2. Instruction Decode & Register File (ID)
+- **Control Unit (`controller.v`)**: Decodes 4-bit Opcode, 2-bit Mode, and S-bit to emit 9-bit execution and pipeline control words (`wb_en`, `mem_r_en`, `mem_w_en`, `b`, `s_out`, `exe_cmd`).
+- **Banked Register File (`register_file.v`)**: $16 \times 32$-bit register array ($R_0-R_{15}$). Writes occur on `negedge clk` while reads are asynchronous (`assign reg1 = rf[src1]`), eliminating intra-cycle RAW structural races.
+- **Condition Evaluator (`condition_check.v`)**: Asserts `cond_met` based on active status flags (`Z`, `C`, `N`, `V`). If the condition fails, the instruction is converted into a pipeline `NOP` via bubble injection.
+- **Second Source Selector (`mux2to1_4.v`)**: Selects register index $R_m$ (`Inst[3:0]`) for data-processing operations, or register index $R_d$ (`Inst[15:12]`) for store operations (`STR`), since $R_d$ serves as the data source to be written to memory.
+
+<p align="center">
+  <img src="docs/figures/id_stage_waveform_1.png" alt="ID Stage Waveform" width="85%"><br>
+  <em>Figure 3: Instruction Decode simulation displaying operand decoding, RF readouts, and condition evaluation.</em>
+</p>
+
+---
+
+### 3. Execution & Arithmetic Logic Unit (EX)
+- **32-bit ALU (`alu.v`)**: Supports arithmetic (`ADD`, `ADC`, `SUB`, `SBC`), logical (`AND`, `ORR`, `EOR`, `MOV`, `MVN`), and comparison operations (`CMP`, `TST`). Computes condition flags:
+  $$\text{Zero Flag } (Z) = (\text{ALU\_Res} == 0)$$
+  $$\text{Negative Flag } (N) = \text{ALU\_Res}[31]$$
+  $$\text{Carry Flag } (C) = \text{Carry-out of addition/subtraction}$$
+  $$\text{Overflow Flag } (V) = (\sim V_1[31] \land \sim V_2[31] \land R[31]) \lor (V_1[31] \land V_2[31] \land \sim R[31])$$
+- **Val2 Generator (`val2_generator.v`)**: Implements flexible shifter operand hardware:
+  - Immediate mode ($I=1$): 8-bit immediate rotated right by $2 \times \text{rotate\_imm}$.
+  - Memory offset mode: 12-bit immediate zero-extended.
+  - Register shift mode ($I=0$): `LSL` (00), `LSR` (01), `ASR` (10, using `$signed`), `ROR` (11).
+- **Branch Target Adder (`adder.v`)**: Computes $\text{Branch Target} = \text{PC} + \text{SignExtended}(\text{Imm24})$.
+
+<p align="center">
+  <img src="docs/figures/exe_stage_waveform.png" alt="EXE Stage Waveform" width="85%"><br>
+  <em>Figure 4: Execution stage waveform showing 32-bit ALU computations, shifter operand generation, and status flag updates.</em>
+</p>
+
+---
+
+### 4. Memory Access & SRAM Controller (MEM)
+- **SRAM Controller FSM (`sram_controller.v`)**: Multi-cycle memory interface connecting the 32-bit CPU bus to an external 8-bit byte-addressable SRAM.
+- **Pipeline Handshake**: While the 4-byte memory transfer is ongoing, the controller deasserts `cpu_ready`, halting the entire pipeline (`freeze_all_stages = ~cpu_ready`).
+
+<p align="center">
+  <img src="docs/figures/sram_architecture_diagram.png" alt="SRAM Architecture Diagram" width="85%"><br>
+  <em>Figure 5: ARM processor core interfaced with the multi-cycle SRAM Controller and physical 8-bit memory chip.</em>
+</p>
+
+---
+
+### 5. Write-Back (WB)
+- **Result Multiplexer (`mux2to1.v`)**: Selects between the registered ALU execution result (`alu_result_wb`) and the loaded memory data (`mem_read_val_wb`) guided by `mem_r_en_wb`.
+- The selected word is routed back to the Register File write port and simultaneously made available to the Forwarding Unit.
+
+---
+
+## Hazard Resolution & Dynamic Forwarding
+
+### 1. Dynamic Forwarding Unit (`forwarding_unit.v`)
+Without operand forwarding, any Read-After-Write (RAW) data dependency requires 2 stall cycles until the result is written back to the Register File. The Dynamic Forwarding Unit monitors stage registers and dynamically routes calculated values directly to ALU inputs:
+
+$$\text{Forward}_{\text{src1}} = 
+\begin{cases}
+2'\text{b01} & \text{if } \text{wb\_en}_{\text{MEM}} \land (\text{dest}_{\text{MEM}} == \text{src1}) \quad \text{[Forward from MEM stage]} \\
+2'\text{b10} & \text{else if } \text{wb\_en}_{\text{WB}} \land (\text{dest}_{\text{WB}} == \text{src1}) \quad \text{[Forward from WB stage]} \\
+2'\text{b00} & \text{otherwise} \quad \text{[Use Register File output]}
+\end{cases}$$
+
+$$\text{Forward}_{\text{src2}} = 
+\begin{cases}
+2'\text{b01} & \text{if } \text{wb\_en}_{\text{MEM}} \land (\text{dest}_{\text{MEM}} == \text{src2}) \quad \text{[Forward from MEM stage]} \\
+2'\text{b10} & \text{else if } \text{wb\_en}_{\text{WB}} \land (\text{dest}_{\text{WB}} == \text{src2}) \quad \text{[Forward from WB stage]} \\
+2'\text{b00} & \text{otherwise} \quad \text{[Use Register File output]}
+\end{cases}$$
+
+### 2. Load-Use Hazard Detection Unit (`hazard_unit.v`)
+Because memory read data is only available at the conclusion of the `MEM` stage, an instruction immediately following an `LDR` that consumes the loaded register cannot be satisfied by forwarding alone. In this case:
+1. The Hazard Detection Unit asserts `hazard_detected = 1'b1`.
+2. `PC` and `IF/ID` registers are frozen for 1 cycle.
+3. A `NOP` bubble is inserted into the `ID/EX` stage.
+4. On the subsequent cycle, the loaded value is forwarded from `MEM` stage to `EX` stage with zero additional penalty.
+
+<p align="center">
+  <img src="docs/figures/forwarding_unit_waveform.png" alt="Forwarding Waveform" width="85%"><br>
+  <em>Figure 6: Waveform comparison verifying zero-stall dynamic operand bypassing from MEM and WB stages into the ALU.</em>
+</p>
+
+---
+
+## Multi-Cycle SRAM Subsystem
+
+The SRAM memory controller serializes 32-bit word accesses across an 8-bit external bus utilizing a 3-state Finite State Machine:
+
+<p align="center">
+  <img src="docs/figures/sram_fsm_state_diagram.jpeg" alt="SRAM FSM State Diagram" width="55%"><br>
+  <em>Figure 7: Finite State Machine transition diagram for the multi-cycle SRAM controller.</em>
+</p>
+
+1. **`IDLE` (State `2'd0`)**: `cpu_ready = 1`. When `cpu_mem_read` or `cpu_mem_write` is asserted, transitions to `WORK` and deasserts `cpu_ready = 0`.
+2. **`WORK` (State `2'd1`)**: Steps a 2-bit counter from `0` to `3`:
+   - **Store (`STR`)**: Asserts `sram_we_n = 0`, sequentially placing `cpu_wdata[7:0]`, `[15:8]`, `[23:16]`, and `[31:24]` on `sram_data` while incrementing `sram_addr`.
+   - **Load (`LDR`)**: Asserts `sram_oe_n = 0`, reading 4 consecutive bytes from `sram_data` into internal latch registers.
+   - When `counter == 3`, transitions to `DONE`.
+3. **`DONE` (State `2'd2`)**: Re-asserts `cpu_ready = 1`, presents the assembled 32-bit word `cpu_rdata = {sram_data, read_data_temp[23:0]}` to the processor datapath, and transitions back to `IDLE`.
+
+---
+
+## Empirical Benchmarks & Speedup
+
+The processor was rigorously benchmarked using a standard 47-instruction verification program testing arithmetic operations, load-use hazards, branch loops, and multi-cycle memory transfers:
+
+| Architectural Configuration | Clock Cycles ($T_{\text{clk}}=10\text{ ns}$) | Total Execution Time | Average CPI | Speedup from Forwarding |
+| :--- | :---: | :---: | :---: | :---: |
+| **Ideal Memory (No Forwarding)** | 292 | 2,920 ns | 6.213 | Baseline |
+| **Ideal Memory (With Forwarding)** | **200** | **2,000 ns** | **4.255** | **+31.51%** |
+| **Multi-Cycle SRAM (No Forwarding)** | 529 | 5,290 ns | 11.255 | Baseline |
+| **Multi-Cycle SRAM (With Forwarding)** | **437** | **4,370 ns** | **9.298** | **+17.39%** |
+
+$$\text{Speedup}_{\text{ideal}} = \frac{6.213 - 4.255}{6.213} \times 100\% = \mathbf{31.51\%}$$
+
+$$\text{Speedup}_{\text{SRAM}} = \frac{11.255 - 9.298}{11.255} \times 100\% = \mathbf{17.39\%}$$
+
+<p align="center">
+  <img src="docs/figures/sram_waveform_forwarding.png" alt="SRAM Waveform with Forwarding" width="49%">
+  <img src="docs/figures/sram_waveform_no_forwarding.png" alt="SRAM Waveform without Forwarding" width="49%"><br>
+  <em>Figure 8: Comparative simulation waveforms with SRAM: (Left) Forwarding Enabled (437 cycles); (Right) Forwarding Disabled (529 cycles).</em>
+</p>
+
+---
+
+## FPGA Implementation & Synthesis Results
+
+The processor and FPGA debugging wrapper (`ARM_wrapper`, instantiating `ARM_inst`, Xilinx Virtual Input/Output `vio_0`, and pushbutton `deb_inst`) were synthesized and implemented in **Xilinx Vivado** targeting the **Xilinx Zynq-7000 SoC (`xc7z010`)**.
+
+### Hardware Utilization Summary (`ARM_wrapper`)
+
+| Resource Type | `ARM_inst` (Core) | `VIO (vio_0)` | `deb_inst` | Total (`ARM_wrapper`) | Available | Utilization (%) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Slice LUTs** | 1,458 | 102 | 7 | **1,567** | 17,600 | **8.90%** |
+| **Slice Registers (FF)** | 904 | 231 | 17 | **1,152** | 35,200 | **3.27%** |
+| **Block RAM Tile (BRAM)** | 0.500 | 0 | 0 | **0.50** | 60 | **0.83%** |
+| **I/O Pins** | - | - | - | **2** | 100 | **2.00%** |
+
+<p align="center">
+  <img src="docs/figures/vivado_utilization_summary.png" alt="Vivado Utilization Chart" width="80%"><br>
+  <em>Figure 9: Post-implementation hardware utilization on Xilinx Zynq-7000 FPGA (8.90% LUT, 3.27% FF, 0.83% BRAM, 2.00% IO).</em>
+</p>
+
+### Synthesis & Hardware Verification Notes
+- **Simulation Clocking**: Cycle-accurate ModelSim verification executes the 47-instruction test program at $T_{\text{clk}} = 10\text{ ns}$ ($100\text{ MHz}$ testbench clock).
+- **On-Board Bring-Up**: Physical board bring-up pairs `debouncer.v` pushbutton conditioning with Xilinx `VIO` probes on Zynq-7000.
+
+<p align="center">
+  <img src="docs/figures/vivado_synthesized_device.png" alt="Synthesized Device View" width="49%">
+  <img src="docs/figures/vivado_schematic_netlist.png" alt="Vivado Netlist View" width="49%"><br>
+  <em>Figure 10: (Left) Device floorplan mapping on Zynq-7000; (Right) Synthesized gate-level netlist schematic.</em>
+</p>
+
+---
+
+## Repository Structure
+
+```text
+Pipelined-ARM-Processor-Verilog/
+├── rtl/                         # Synthesizable Verilog HDL source files
+│   ├── adder.v                  # 32-bit ripple/carry adder for PC & branch target
+│   ├── alu.v                    # 32-bit ALU supporting ARM arithmetic, logic, and CMP
+│   ├── arm_core.v               # Top-level ARM 5-stage pipelined processor core
+│   ├── arm_wrapper.v            # Board-level wrapper for FPGA synthesis with debouncer
+│   ├── condition_check.v        # Evaluator for 15 ARM condition codes against NZCV
+│   ├── controller.v             # Main instruction opcode and mode decoder
+│   ├── debouncer.v              # Digital pushbutton debouncer for board clock/reset
+│   ├── ex_mem_reg.v             # EX/MEM stage pipeline register
+│   ├── ex_stage.v               # Execution stage (ALU, Val2 generator, status register)
+│   ├── forwarding_unit.v        # Dynamic operand forwarding bypass unit (MEM & WB to EX)
+│   ├── hazard_unit.v            # RAW Load-Use hazard detection and pipeline freeze unit
+│   ├── id_ex_reg.v              # ID/EX stage pipeline register with flush/bubble support
+│   ├── id_stage.v               # Instruction Decode stage (RF, controller, condition check)
+│   ├── if_id_reg.v              # IF/ID stage pipeline register with freeze/flush
+│   ├── if_stage.v               # Instruction Fetch stage (PC register, PC+1 adder, branch mux)
+│   ├── mem_stage.v              # Memory stage interface
+│   ├── mem_wb_reg.v             # MEM/WB stage pipeline register
+│   ├── mux2to1.v                # Parameterized 2-to-1 multiplexer
+│   ├── mux2to1_4.v              # 4-bit 2-to-1 multiplexer for register addresses
+│   ├── mux2to1_9.v              # 9-bit 2-to-1 multiplexer for control bubble injection
+│   ├── mux3to1_32.v             # 32-bit 3-to-1 multiplexer for operand forwarding
+│   ├── pc.v                     # 32-bit Program Counter register with freeze enable
+│   ├── register_file.v          # 16x32-bit banked register file with negedge synchronous write
+│   ├── sram_controller.v        # 3-state FSM multi-cycle SRAM memory controller
+│   ├── sram_model.v             # Behavioral 2KB byte-addressable SRAM chip model
+│   ├── status_register.v        # 4-bit architectural condition flag register (NZCV)
+│   ├── uart_mmio.v              # Memory-mapped UART transmitter
+│   ├── val2_generator.v         # Shifter operand & 32-bit rotated immediate generator
+│   └── wb_stage.v               # Write-back multiplexer stage
+├── tb/                          # Verification testbench suites
+│   ├── instruction_memory.v     # Behavioral ROM preloaded with test machine code
+│   ├── tb_arm.v                 # Top-level self-checking processor testbench with CPI counters
+│   ├── tb_controller.v          # Standalone control unit verification testbench
+│   ├── tb_sram.v                # Standalone SRAM controller multi-cycle verification testbench
+│   ├── tb_uart_c.v              # Self-checking C firmware and UART simulation
+│   ├── tb_uart_mmio.v           # UART transmitter overrun test
+│   └── program.hex              # Benchmark machine code program in Verilog memory format
+├── sim/                         # Simulation automation scripts and waveforms
+│   ├── firmware/                # UART C source and Keil scatter file
+│   ├── program.coe              # Xilinx coefficient file for Block RAM initialization
+│   ├── program.hex              # Machine code instructions for simulation
+│   ├── run_modelsim.tcl         # Automated compilation and execution script for ModelSim/Questa
+│   ├── run_uart.py              # Keil firmware build and UART simulation runner
+│   ├── run_vivado.tcl           # Batch-mode simulation script for Vivado XSim
+│   └── waveform.wcfg            # Vivado waveform signal display configuration
+├── docs/                        # Architectural documentation and reports
+│   ├── figures/                 # 34 high-resolution schematics, waveforms, and FPGA charts
+│   ├── IEEE_Report.tex          # Academic paper in IEEEtran conference format
+│   └── CA_Lab_Report_Persian.pdf# Archival laboratory technical report (Persian)
+├── .gitignore                   # Vivado and ModelSim build artifact exclusions
+├── LICENSE                      # MIT Open-Source License
+└── README.md                    # Bilingual comprehensive documentation
+```
+
+---
+
+## Verification & Simulation Guide
+
+### Prerequisites
+- **ModelSim / QuestaSim** (v10.4+) OR **Xilinx Vivado** (2018.3 or newer).
+
+### 1. Running ModelSim / QuestaSim
+Open ModelSim, navigate to the `sim/` directory, and execute:
+```tcl
+cd sim
+do run_modelsim.tcl
+```
+The script compiles the RTL and testbench, loads `sim/program.hex`, runs for
+6,000 ns, and adds datapath signals to the waveform viewer.
+
+The report is printed at 6,030 ns (after 30 ns of reset). Run an additional
+`run 30 ns` after the script to see it. The reported instruction count is a
+fixed testbench value, not a measured retirement count.
+
+### C UART smoke test (Keil + Questa or WSL Verilator)
+
+The example builds `sim/firmware/uart.c` in ARM state with Keil ARM Compiler 5,
+links it using `sim/firmware/uart.sct`, converts the little-endian image into
+the ROM's 32-bit binary-text format, and checks the serial output `OK\n`.
+From Windows PowerShell, with Python and Questa on `PATH`:
+
+```powershell
+py -3.12 sim\run_uart.py --simulator questa
+py -3.12 sim\run_uart.py --simulator verilator
+```
+
+The second command requires WSL with Verilator, GNU make, and a C++ compiler.
+Both commands use `C:\Keil_v5\ARM\ARMCC\bin` by default; pass
+`--arm-bin C:\path\to\ARMCC\bin` to use another ARM Compiler 5 installation.
+Both commands run from **Windows**: even the Verilator option uses the Windows
+Keil tools to build the firmware, then invokes Verilator in WSL. Generated
+files go into `sim/build/uart/`, which is ignored by Git.
+
+#### From C to the instruction ROM
+
+The runner executes these steps:
+
+1. **Compile:** `armcc --cpu 4T --arm -O2 -c` compiles `uart.c` to the ARM
+   object file `uart.o`.
+2. **Link:** `armlink` uses `uart.sct` to place the read-only code at byte
+   address `0x00000000`, sets `uart_start` as the entry point, and produces
+   `uart.axf` (an ELF image) and `uart.map`. The scatter file reserves up to
+   `0x1000` bytes of instruction ROM; it does not define or initialize C data,
+   BSS, or a stack for this example.
+3. **Extract:** `fromelf --bin` extracts the linked image to `uart.bin`.
+4. **Convert:** the runner reads each group of four bytes as a little-endian
+   32-bit word and writes 32 binary digits per line to `uart_program.hex`. For
+   example, the bytes `00 00 a0 e3` form ARM instruction `0xe3a00000` and
+   become `11100011101000000000000000000000`. The runner rejects empty,
+   unaligned, or larger-than-4096-byte images. Despite its `.hex` name, this
+   file contains **binary text**, not hexadecimal, Intel HEX, or a raw binary.
+
+To inspect or repeat the Keil steps manually from the project root:
+
+```powershell
+New-Item -ItemType Directory -Force sim\build\uart | Out-Null
+$arm = 'C:\Keil_v5\ARM\ARMCC\bin'
+$source = (Resolve-Path sim\firmware\uart.c).Path
+$scatter = (Resolve-Path sim\firmware\uart.sct).Path
+Push-Location sim\build\uart
+& "$arm\armcc.exe" --cpu 4T --arm -O2 -c $source -o uart.o
+& "$arm\armlink.exe" --scatter $scatter --entry uart_start --map --list uart.map uart.o -o uart.axf
+& "$arm\fromelf.exe" --bin --output uart.bin uart.axf
+& "$arm\fromelf.exe" --text -c uart.axf  # inspect the ARM disassembly
+Pop-Location
+```
+
+These commands produce the ELF, map and binary; the `run_uart.py` command above
+also converts the binary into `uart_program.hex` and runs the simulation.
+
+#### ROM loading, boot, and serial output
+
+1. The runner starts the simulator with `sim/build/uart/` as its working
+   directory. At simulation time zero, `tb/instruction_memory.v` clears its
+   1024-word array and calls `$readmemb(INIT_FILE, rom)` to preload
+   `uart_program.hex`. This is a simulation-time ROM initialization (a
+   backdoor preload), not a CPU bus transaction. It uses **`$readmemb`**, not
+   `$readmemh`; the simulator does not load the ELF or binary directly.
+2. `tb/tb_uart_c.v` holds reset until 31 ns. The PC resets to word index zero;
+   the first ROM word is therefore the instruction linked at byte address
+   zero. The internal fetch PC increments by one word per instruction; branch
+   displacements in the ARM-compatible mode account for the ARM PC offset.
+3. The processor executes the generated ARM instructions. `uart.c` polls the
+   UART ready bit, writes `O`, `K`, and newline, then loops forever. The
+   testbench detects each start bit, samples the serial TX line, checks the
+   received bytes, and prints the **decoded UART output**, followed by a
+   pass message. The program itself does not have a console or `printf`.
+
+Expected output (Questa prefixes its transcript lines with `#`):
+
+```text
+UART TX: OK
+PASS: ARM C firmware transmitted OK\n, including busy polling
+```
+
+If a byte is incorrect, the transmitter overruns, or the test times out, the
+test fails. Questa output is also saved in `sim/build/uart/uart-transcript.log`.
+
+The testbench instantiates `arm_core` with `ARM_COMPATIBLE=1`, a 2 KiB SRAM,
+and `uart_mmio`. CPU data addresses are byte addresses in this mode. The UART
+occupies `0x1fc` through `0x1ff`: a 32-bit read at `0x1fc` returns TX-ready
+in bit 0; a 32-bit write sends its low byte. Firmware must poll ready before
+each write. A write while busy is discarded and latches the `overrun` output.
+The UART sends 8-N-1, with `CLKS_PER_BIT=868` by default (approximately
+115200 baud at 100 MHz); the 100 MHz test clock uses 16 clocks per bit
+(6.25 Mbaud) to keep simulation short.
+
+This is a **restricted C smoke test**, not full ARM or general C support.
+`ARM_COMPATIBLE=1` adds the positive immediate pre-indexed word LDR/STR form,
+ARM-style branch displacement, and forwarding of pending status flags to the
+existing subset; it does not add
+Thumb, branch-and-link, PC-relative literals, or a C runtime. The program
+uses no stack, initialized data, or function calls. The instruction ROM is
+word-indexed internally; CPU data addresses use only the low 11 bits and wrap.
+The UART is connected in the simulation testbench, not the existing FPGA
+wrapper; board-level integration and pin constraints are still needed.
+The default core mode remains the legacy mode.
+
+### 2. Running Xilinx Vivado Simulation (Batch Mode)
+From a terminal or PowerShell in the `sim/` directory:
+```bash
+cd sim
+vivado -mode batch -source run_vivado.tcl
+```
+
+### 3. Toggling Forwarding vs. Stalling Comparison
+In `tb/tb_arm.v`, adjust line 62:
+```verilog
+forwarding_en = 1; // 1 = Dynamic Forwarding Enabled (200 cycles / 437 cycles)
+                   // 0 = Stalling Only (292 cycles / 529 cycles)
+```
+
+---
+
+## خلاصه معماری به زبان فارسی (Persian Overview)
+
+<div dir="rtl" align="right">
+
+### پیاده‌سازی سخت‌افزاری پردازنده ۵ طبقه‌ای خط‌لوله‌ای ARM در زبان Verilog HDL
+
+این مخزن شامل طراحی کامل، اعتبارسنجی چرخه‌دقیق و پیاده‌سازی فیزیکی یک پردازنده ۳۲ بیتی با معماری خط‌لوله‌ای (۵ طبقه‌ای) سازگار با مجموعه دستورات **ARMv4T** می‌باشد که در آزمایشگاه معماری کامپیوتر دانشکده مهندسی برق و کامپیوتر **دانشگاه تهران** تحت نظارت **دکتر سعید صفری** پیاده‌سازی شده است.
+
+#### ویژگی‌های برجسته فنی:
+۱. **پایپ‌لاین ۵ طبقه‌ای استاندارد RISC**: شامل طبقات واکشی دستور (`IF`)، دیکود و خواندن از رجیستر فایل (`ID`)، اجرا و محاسبات آریتمتیک (`EX`)، دسترسی به حافظه (`MEM`)، و بازنویسی در رجیستر فایل (`WB`).
+۲. **واحد فورواردینگ پویا (Forwarding Unit)**: حذف کامل حباب‌های خط‌لوله ناشی از مخاطرات داده‌ای RAW با ارسال مستقیم نتایج از خروجی مراحل EX/MEM و MEM/WB به ورودی‌های ALU با اولویت‌بندی داینامیک.
+۳. **واحد تشخیص و مدیریت مخاطره (Hazard Detection Unit)**: تشخیص هوشمند مخاطره Load-Use (وابستگی داده‌ای به دستور LDR) و توقف خط‌لوله (Freeze) به مدت ۱ سیکل به همراه تزریق حباب NOP.
+۴. **کنترلر حافظه خارجی چندسیکلی SRAM**: طراحی ماشین حالت متناهی (FSM) سه‌وضعیته به منظور تبدیل دسترسی‌های کلمه‌ای ۳۲ بیتی به ۴ بایت متوالی بر روی باس داده ۸ بیتی حافظه فیزیکی به همراه پروتکل Handshake و فریز خودکار پردازنده.
+۵. **رجیستر فایل بانک‌شده ۱۶ در ۳۲ بیتی**: خواندن غیرهمگام با دو پورت مستقل و نوشتن در لبه پایین‌رونده کلاک (`negedge`) جهت جلوگیری از مخاطرات ساختاری و تداخل همزمان خواندن و نوشتن.
+۶. **پشتیبانی کامل از شروط دستوری ARM**: ارزیابی بلادرنگ ۱۵ کد شرطی ARM با توجه به ۴ بیت پرچم وضعیت (`Z, C, N, V`).
+
+#### نتایج ارزیابی و بنچ‌مارک شبیه‌سازی (۴۷ دستورالعمل):
+- **حافظه ایده‌آل تک‌سیکلی بدون فورواردینگ**: ۲۹۲ سیکل ($\text{CPI} = 6.213$)
+- **حافظه ایده‌آل تک‌سیکلی با فورواردینگ**: ۲۰۰ سیکل ($\text{CPI} = 4.255$) $\leftarrow$ **۳۱.۵۱٪ بهبود سرعت (Speedup)**
+- **حافظه چندسیکلی SRAM بدون فورواردینگ**: ۵۲۹ سیکل ($\text{CPI} = 11.255$)
+- **حافظه چندسیکلی SRAM با فورواردینگ**: ۴۳۷ سیکل ($\text{CPI} = 9.298$) $\leftarrow$ **۱۷.۳۹٪ بهبود سرعت (Speedup)**
+
+#### نتایج سنتز سخت‌افزاری روی تراشه FPGA (Xilinx Zynq-7000 - `ARM_wrapper`):
+- **تعداد Slice LUTs مصرفی**: ۱,۵۶۷ از ۱۷,۶۰۰ (۸.۹۰٪ کل تراشه - شامل ۱,۴۵۸ LUT برای هسته `ARM_inst`، ۱۰۲ LUT برای `VIO` و ۷ LUT برای `deb_inst`)
+- **تعداد Slice Registers (FFs)**: ۱,۱۵۲ از ۳۵,۲۰۰ (۳.۲۷٪ - شامل ۹۰۴ FF در هسته `ARM_inst`، ۲۳۱ در `VIO` و ۱۷ در `deb_inst`)
+- **حافظه Block RAM مصرفی**: ۰.۵۰ تایل از ۶۰ (۰.۸۳٪ - مربوط به هسته `ARM_inst`)
+- **تعداد پین‌های I/O**: ۲ از ۱۰۰ (۲.۰۰٪)
+
+</div>
+
+---
+
+## Author & License
+
+- **Author**: [Alireza Najafi Motiei](https://github.com/alirezanmotiei)
+- **Affiliation**: Department of Electrical and Computer Engineering, University of Tehran
+- **Course**: Computer Architecture Laboratory
+- **Supervisor**: Dr. Saeed Safari
+- **License**: Distributed under the terms of the [MIT License](LICENSE).
