@@ -175,19 +175,14 @@ graph TD
 ### 1. Dynamic Forwarding Unit (`forwarding_unit.v`)
 Without operand forwarding, any Read-After-Write (RAW) data dependency requires 2 stall cycles until the result is written back to the Register File. The Dynamic Forwarding Unit monitors stage registers and dynamically routes calculated values directly to ALU inputs:
 
-$$\text{Forward}_{\text{src1}} = 
-\begin{cases}
-2'\text{b01} & \text{if } \text{wb\_en}_{\text{MEM}} \land (\text{dest}_{\text{MEM}} == \text{src1}) \quad \text{[Forward from MEM stage]} \\
-2'\text{b10} & \text{else if } \text{wb\_en}_{\text{WB}} \land (\text{dest}_{\text{WB}} == \text{src1}) \quad \text{[Forward from WB stage]} \\
-2'\text{b00} & \text{otherwise} \quad \text{[Use Register File output]}
-\end{cases}$$
+For each source (`src1` and `src2`), the forwarding selector uses the first
+matching rule:
 
-$$\text{Forward}_{\text{src2}} = 
-\begin{cases}
-2'\text{b01} & \text{if } \text{wb\_en}_{\text{MEM}} \land (\text{dest}_{\text{MEM}} == \text{src2}) \quad \text{[Forward from MEM stage]} \\
-2'\text{b10} & \text{else if } \text{wb\_en}_{\text{WB}} \land (\text{dest}_{\text{WB}} == \text{src2}) \quad \text{[Forward from WB stage]} \\
-2'\text{b00} & \text{otherwise} \quad \text{[Use Register File output]}
-\end{cases}$$
+| Priority | Condition | Selector | Source |
+| :--- | :--- | :--- | :--- |
+| 1 | Forwarding enabled, `wb_en_mem` and `dest_mem == src` | `2'b01` | MEM stage |
+| 2 | Forwarding enabled, `wb_en_wb` and `dest_wb == src` | `2'b10` | WB stage |
+| 3 | Otherwise | `2'b00` | Register file |
 
 ### 2. Load-Use Hazard Detection Unit (`hazard_unit.v`)
 Because memory read data is only available at the conclusion of the `MEM` stage, an instruction immediately following an `LDR` that consumes the loaded register cannot be satisfied by forwarding alone. In this case:
@@ -232,9 +227,8 @@ The processor was rigorously benchmarked using a standard 47-instruction verific
 | **Multi-Cycle SRAM (No Forwarding)** | 529 | 5,290 ns | 11.255 | Baseline |
 | **Multi-Cycle SRAM (With Forwarding)** | **437** | **4,370 ns** | **9.298** | **+17.39%** |
 
-$$\text{Speedup}_{\text{ideal}} = \frac{6.213 - 4.255}{6.213} \times 100\% = \mathbf{31.51\%}$$
-
-$$\text{Speedup}_{\text{SRAM}} = \frac{11.255 - 9.298}{11.255} \times 100\% = \mathbf{17.39\%}$$
+- **Ideal memory cycle reduction**: (292 - 200) / 292 = **31.51%**.
+- **SRAM cycle reduction**: (529 - 437) / 529 = **17.39%**.
 
 <p align="center">
   <img src="docs/figures/sram_waveform_forwarding.png" alt="SRAM Waveform with Forwarding" width="49%">
