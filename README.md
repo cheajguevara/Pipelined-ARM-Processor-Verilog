@@ -246,6 +246,78 @@ $$\text{Speedup}_{\text{SRAM}} = \frac{11.255 - 9.298}{11.255} \times 100\% = \m
 
 ## FPGA Implementation & Synthesis Results
 
+### Artix-7 core synthesis
+
+The repeatable synthesis flow targets `xc7a100tcsg324-1`, the part used by the
+referenced project. Confirm that package and speed grade match your board. It
+synthesizes `arm_core` as the top with `ARM_COMPATIBLE=1`, `IRQ_SUPPORT=1`,
+and a 20 ns (50 MHz) clock constraint. This is a core-only synthesis, not a
+complete SoC. The separate interrupt controller, instruction memory and UART
+are not included. The current `arm_wrapper` has an undriven instruction input
+and does not provide a usable complete system.
+
+From Windows PowerShell, with Vivado installed at the shown path:
+
+```powershell
+$root = 'F:\ARM_EXP\Pipelined-ARM-Processor-Verilog'
+New-Item -ItemType Directory -Force (Join-Path $root 'sim\build\synth') | Out-Null
+Push-Location (Join-Path $root 'sim\build\synth')
+& 'C:\Xilinx\2025.1\Vivado\bin\vivado.bat' -mode batch -notrace `
+    -source (Join-Path $root 'sim\run_synth.tcl') -log vivado.log -journal vivado.jou
+$synthExit = $LASTEXITCODE
+Pop-Location
+if ($synthExit -ne 0) { throw "Vivado synthesis failed: $synthExit" }
+```
+
+The script writes a synthesized checkpoint, utilization and timing reports, and
+the Vivado log to `sim\build\synth\`, which is ignored by Git. It checks that
+the design retains registers and all eight bidirectional SRAM I/O buffers.
+Full top-level synthesis is used because out-of-context synthesis converted the
+SRAM tristates to logic with critical warnings. The SRAM controller uses only
+address bits `[10:0]` in this configuration, so higher addresses alias; a real
+SoC needs appropriate decoding and memory interfaces.
+
+With Vivado 2025.1, the synthesized core used 1,494 LUTs (2.36%), 1,075
+flip-flops (0.85%), 91 I/O pins and no block RAM or DSPs. The estimated setup
+WNS was +3.282 ns for the specified 50 MHz clock. This is **pre-placement and
+pre-routing**, not board timing closure: 43 input and 55 output ports have no
+I/O delay constraints. No board pin assignments, implementation, bitstream,
+post-route timing simulation or hardware test are included.
+
+### Post-synthesis functional simulation
+
+The following Windows PowerShell command re-synthesizes the core, exports a
+functional netlist, rebuilds the UART C firmware with Keil ARM Compiler 5, runs
+the UART RTL test in Questa, and then runs three post-synthesis tests in Vivado
+XSim:
+
+```powershell
+Set-Location 'F:\ARM_EXP\Pipelined-ARM-Processor-Verilog'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\sim\run_post_synth.ps1
+```
+
+The script defaults to `C:\Xilinx\2025.1\Vivado\bin` and
+`C:\Keil_v5\ARM\ARMCC\bin`; override them with `-VivadoBin` and `-ArmBin`
+if necessary. Python and the Questa command-line tools must also be on PATH.
+Logs are in `sim\build\post_synth\`, and the generated netlist and checkpoint
+are in `sim\build\synth\`.
+
+- UART: the same C firmware runs on the synthesized core and the test decodes
+  `OK\n` from the UART TX line, including busy polling.
+- IRQ: a small ARM instruction program checks interruption during an SRAM
+  write, the IRQ-banked SP and LR, restoration of the Z flag, return to main
+  execution, and a held level interrupt retriggering. The test runs with
+  forwarding both enabled and disabled.
+
+Only the core is synthesized; the UART, SRAM model, instruction ROM, and IRQ
+controller are RTL/testbench models. The tests use a 10 ns simulated clock and
+the Xilinx functional primitive models, with reset held past global startup.
+No SDF or routing delays are applied, so this does **not** establish 100 MHz
+operation or timing closure. IRQ-disabled configuration and full ARM exception
+behavior are not tested by this netlist.
+
+### Historical Zynq-7000 results
+
 The processor and FPGA debugging wrapper (`ARM_wrapper`, instantiating `ARM_inst`, Xilinx Virtual Input/Output `vio_0`, and pushbutton `deb_inst`) were synthesized and implemented in **Xilinx Vivado** targeting the **Xilinx Zynq-7000 SoC (`xc7z010`)**.
 
 ### Hardware Utilization Summary (`ARM_wrapper`)

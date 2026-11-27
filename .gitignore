@@ -18,6 +18,7 @@ __pycache__/
 *.py[cod]
 
 # Xilinx Vivado
+xsim.dir/
 *.jou
 *.log
 *.pb

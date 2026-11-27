@@ -23,7 +23,11 @@ module tb_uart_c;
         .instruction(instruction)
     );
 
+`ifdef POST_SYNTH
+    arm_core core (
+`else
     arm_core #(.ARM_COMPATIBLE(1)) core (
+`endif
         .clk(clk),
         .rst(rst),
         .forwarding_en(1'b1),
@@ -83,7 +87,11 @@ module tb_uart_c;
     endtask
 
     initial begin
+`ifdef POST_SYNTH
+        #201 rst = 0;
+`else
         #31 rst = 0;
+`endif
         $write("UART TX: ");
         receive_byte(received);
         if (received !== "O") $fatal(1, "Expected O, received %02x", received);
