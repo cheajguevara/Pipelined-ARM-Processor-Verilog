@@ -294,6 +294,7 @@ Pipelined-ARM-Processor-Verilog/
 │   ├── id_stage.v               # Instruction Decode stage (RF, controller, condition check)
 │   ├── if_id_reg.v              # IF/ID stage pipeline register with freeze/flush
 │   ├── if_stage.v               # Instruction Fetch stage (PC register, PC+1 adder, branch mux)
+│   ├── irq_controller.v         # Standalone ten-source Wishbone IRQ concentrator
 │   ├── mem_stage.v              # Memory stage interface
 │   ├── mem_wb_reg.v             # MEM/WB stage pipeline register
 │   ├── mux2to1.v                # Parameterized 2-to-1 multiplexer
@@ -312,6 +313,10 @@ Pipelined-ARM-Processor-Verilog/
 │   ├── instruction_memory.v     # Behavioral ROM preloaded with test machine code
 │   ├── tb_arm.v                 # Top-level self-checking processor testbench with CPI counters
 │   ├── tb_controller.v          # Standalone control unit verification testbench
+│   ├── tb_arm_irq.v             # Core IRQ entry and return integration test
+│   ├── tb_arm_irq_branch_stall.v# IRQ with a branch held by an SRAM stall
+│   ├── tb_irq_controller.v      # Interrupt concentrator unit test
+│   ├── tb_riscv_address_map.v   # Test of external RISC-V SoC address decoder
 │   ├── tb_sram.v                # Standalone SRAM controller multi-cycle verification testbench
 │   ├── tb_uart_c.v              # Self-checking C firmware and UART simulation
 │   ├── tb_uart_mmio.v           # UART transmitter overrun test
@@ -456,6 +461,100 @@ word-indexed internally; CPU data addresses use only the low 11 bits and wrap.
 The UART is connected in the simulation testbench, not the existing FPGA
 wrapper; board-level integration and pin constraints are still needed.
 The default core mode remains the legacy mode.
+
+### Experimental ARM IRQ path
+
+The core has an **opt-in, limited IRQ implementation**:
+instantiate `arm_core` with `ARM_COMPATIBLE=1` and `IRQ_SUPPORT=1`, connect
+the active-high `irq` input, and optionally observe `irq_active`. With the
+default `IRQ_SUPPORT=0`, existing behavior is preserved and `irq_active` is
+low. The core synchronizes the input through two flip-flops; a source must
+hold the interrupt high until serviced rather than send a short pulse.
+
+On an interrupt, the core finishes older pipeline and SRAM operations, saves
+the interrupted Z/C/N/V flags, banks IRQ R13 and R14, and fetches the IRQ
+vector at byte address `0x18` (word index 6). IRQ R14 receives the byte
+address of the next instruction plus four. The handler returns using the
+ARM instruction `SUBS pc, lr, #4`; this restores the saved flags and resumes
+the interrupted instruction stream. Further IRQ entry is blocked during the
+handler. If the level is still high after return, it can trigger again.
+
+This is **not a complete ARM exception architecture**: there is no CPSR or
+SPSR register access, software-controlled CPSR interrupt mask, FIQ, full mode
+switching, nested interrupts, or general exception support. IRQs are enabled
+after reset when the parameter is enabled, so use the external interrupt
+controller's mask to control them. The IRQ stack pointer is banked but must
+be initialized by software; the handler must save and restore any shared
+registers it modifies and clear the interrupt source. Only the exact
+`SUBS pc, lr, #4` return form is implemented. The core's data bus and
+instruction fetch still do not match the RISC-V SoC's Wishbone and
+acknowledged instruction interfaces; this is not yet a drop-in SoC core.
+
+`tb/tb_arm_irq.v` connects the IRQ controller directly to the core and tests
+entry and return during SRAM activity, flag restoration, banked registers,
+branch-loop resumption, and repeated level-triggered interrupts.
+`tb/tb_arm_irq_branch_stall.v` tests an IRQ while an older store stalls a
+branch in the execute stage.
+
+### Standalone interrupt controller prototype
+
+`rtl/irq_controller.v` is a **standalone, not yet integrated** ten-source
+interrupt concentrator. It accepts synchronous active-high level inputs,
+masks them individually, and asserts `irq` when any enabled source is high.
+The lowest numbered pending source has priority. It has a 32-bit Wishbone
+register interface with no stall and a registered response; `wb_addr` is the
+byte offset within a 16-byte decoded window. The SoC must decode the window,
+provide clock-domain synchronization if needed, and clear the interrupt at
+its source. Mask bits reset to zero.
+
+| Offset | Register | Meaning |
+| --- | --- | --- |
+| `0x0` | enable | Read/write: bits 9:0 enable individual inputs; honors byte select |
+| `0x4` | pending | Read: enabled active inputs in bits 9:0 |
+| `0x8` | priority | Read: bit 4 is valid; bits 3:0 contain the lowest pending index, or `0xf` if none |
+| `0xc` | sources | Read: unmasked input levels in bits 9:0 |
+
+Unaligned accesses assert `wb_err` rather than `wb_ack`. The existing RISC-V
+SoC's data bus has no error input, so an integration must explicitly handle
+that mismatch. Its external interrupt is tied low, while timer and software
+interrupts are separate signals. A 10-input integration could assign them
+to two inputs, leaving eight others; this mapping is not wired yet. Its
+existing decoder also does not route an IRQ-controller window.
+
+To run the standalone test with Questa from the project root:
+
+```powershell
+New-Item -ItemType Directory -Force sim\build\irq | Out-Null
+Push-Location sim\build\irq
+vmap -c
+vlib work
+vmap work work
+vlog ..\..\..\rtl\irq_controller.v ..\..\..\tb\tb_irq_controller.v
+vsim -c work.tb_irq_controller -do "run -all; quit -f"
+$rtl = Get-ChildItem ..\..\..\rtl\*.v | ForEach-Object { $_.FullName }
+vlog $rtl ..\..\..\tb\tb_arm_irq.v
+vsim -c work.tb_arm_irq -do "run -all; quit -f"
+vlog $rtl ..\..\..\tb\tb_arm_irq_branch_stall.v
+vsim -c work.tb_arm_irq_branch_stall -do "run -all; quit -f"
+vlog F:\ARM_EXP\RISC-V\test\rv32i_soc.v ..\..\..\tb\tb_riscv_address_map.v
+vsim -c work.tb_riscv_address_map -do "run -all; quit -f"
+Pop-Location
+```
+
+The second test requires the separate RISC-V project; adjust its path if
+needed. It exercises its actual `memory_wrapper` decoder with stub responses,
+not the ARM core or the IRQ controller connected to that decoder. It checks
+the RAM, CLINT, UART, I2C and GPIO range boundaries, a DDR address, and a
+candidate IRQ window at `0x80000140`–`0x8000014f`. All four candidate IRQ
+register addresses currently select **no device and receive no ACK**.
+The RISC-V decoder must be extended before that window can be used; its
+current peripheral selection also considers only the top address bits and
+low 12 bits, so address aliases must be accounted for during integration.
+
+The controller is connected to the core only in the IRQ integration
+testbench; the example FPGA wrapper and the RISC-V SoC are not wired to it.
+Do not treat the standalone controller or decoder tests as proof of SoC
+interrupt operation.
 
 ### 2. Running Xilinx Vivado Simulation (Batch Mode)
 From a terminal or PowerShell in the `sim/` directory:

@@ -13,11 +13,15 @@ module status_register (
     input  wire       rst,
     input  wire       s_en,
     input  wire [3:0] status_in,   // [Z, C, N, V]
+    input  wire       restore,
+    input  wire [3:0] restored_status,
     output reg  [3:0] status_out
 );
     always @(posedge clk or posedge rst) begin
         if (rst)
             status_out <= 4'd0;
+        else if (restore)
+            status_out <= restored_status;
         else if (s_en)
             status_out <= status_in;
     end

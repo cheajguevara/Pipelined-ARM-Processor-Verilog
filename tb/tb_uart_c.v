@@ -27,6 +27,8 @@ module tb_uart_c;
         .clk(clk),
         .rst(rst),
         .forwarding_en(1'b1),
+        .irq(1'b0),
+        .irq_active(),
         .instruction_in(instruction),
         .pc_out(pc),
         .sram_addr(sram_addr),

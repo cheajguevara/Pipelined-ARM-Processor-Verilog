@@ -35,6 +35,8 @@ module arm_wrapper (
         .clk(clk),
         .rst(rst),
         .forwarding_en(forwarding_enable),
+        .irq(1'b0),
+        .irq_active(),
         .instruction_in(instruction),
         .pc_out(pc),
         .sram_addr(sram_addr),

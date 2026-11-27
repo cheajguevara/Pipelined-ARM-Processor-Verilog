@@ -9,7 +9,8 @@
 `timescale 1ns / 1ps
 
 module arm_core #(
-    parameter ARM_COMPATIBLE = 0
+    parameter ARM_COMPATIBLE = 0,
+    parameter IRQ_SUPPORT = 0
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -22,7 +23,10 @@ module arm_core #(
     inout  wire [7:0]  sram_data,
     output wire        sram_cs_n,
     output wire        sram_oe_n,
-    output wire        sram_we_n
+    output wire        sram_we_n,
+
+    input  wire        irq,
+    output wire        irq_active
 );
     // Pipeline control wires
     wire branch_taken;
@@ -32,12 +36,32 @@ module arm_core #(
     wire [31:0] pc_id;
     wire [31:0] instruction_id;
 
-    wire hazard_stall;
+    wire hazard_stall, hazard_detected;
     wire sram_ready;
     wire system_freeze = hazard_stall | (~sram_ready);
     wire freeze_all_stages = ~sram_ready;
+    localparam IRQ_IDLE = 2'd0, IRQ_DRAIN = 2'd1, IRQ_HANDLER = 2'd2, IRQ_RETURN = 2'd3;
+    reg [1:0] irq_state;
+    (* ASYNC_REG = "TRUE" *) reg irq_meta, irq_sync;
+    reg irq_save_lr;
+    reg [31:0] irq_return_addr;
+    reg [3:0] irq_saved_flags;
+    wire [31:0] irq_lr;
+    wire irq_cond_met;
+    wire irq_entry_request, irq_return_request, irq_pipeline_empty;
+    wire irq_enter, irq_exit, irq_hold_fetch;
+    wire pc_redirect;
+    wire [31:0] pc_redirect_addr;
+
+    initial begin
+        if (IRQ_SUPPORT && !ARM_COMPATIBLE)
+            $fatal(1, "IRQ_SUPPORT requires ARM_COMPATIBLE");
+    end
 
     assign pc_out = pc_current_if;
+    assign irq_active = IRQ_SUPPORT && (irq_state == IRQ_HANDLER || irq_state == IRQ_RETURN);
+    assign hazard_stall = (irq_state == IRQ_DRAIN || irq_state == IRQ_RETURN)
+        ? 1'b0 : hazard_detected;
 
     //-------------------------------------------------------------------------
     // 1. Instruction Fetch (IF) Stage
@@ -46,8 +70,9 @@ module arm_core #(
         .clk(clk),
         .rst(rst),
         .freeze(system_freeze),
-        .branch_taken(branch_taken),
-        .branch_addr(branch_addr_exe),
+        .hold_fetch(irq_hold_fetch),
+        .branch_taken(pc_redirect),
+        .branch_addr(pc_redirect_addr),
         .pc_current(pc_current_if),
         .pc_plus_1(pc_plus_1_if)
     );
@@ -56,7 +81,7 @@ module arm_core #(
         .clk(clk),
         .rst(rst),
         .freeze(system_freeze),
-        .flush(branch_taken),
+        .flush(branch_taken | irq_hold_fetch),
         .pc_in(pc_plus_1_if),
         .instruction_in(instruction_in),
         .pc_out(pc_id),
@@ -76,6 +101,7 @@ module arm_core #(
     wire [31:0] wb_result_mux;
     wire wb_en_mem_wb;
     wire [3:0] dest_mem_wb;
+    wire wb_en_mem, mem_r_en_mem, mem_w_en_mem;
 
     id_stage #(.ARM_COMPATIBLE(ARM_COMPATIBLE)) id_stage_inst (
         .clk(clk),
@@ -84,8 +110,12 @@ module arm_core #(
         .result_wb(wb_result_mux),
         .write_back_en(wb_en_mem_wb),
         .dest_wb(dest_mem_wb),
-        .hazard(system_freeze),
+        .hazard(system_freeze | irq_return_request),
         .sr(status_flags_id),
+        .irq_mode(irq_active),
+        .irq_save_lr(irq_save_lr),
+        .irq_return_addr(irq_return_addr),
+        .irq_lr(irq_lr),
         .wb_en(wb_en_id),
         .mem_r_en(mem_r_en_id),
         .mem_w_en(mem_w_en_id),
@@ -111,7 +141,56 @@ module arm_core #(
 
     assign status_flags_id = (ARM_COMPATIBLE && s_ex)
         ? status_flags_next : status_flags_exe;
-    assign branch_taken = b_ex;
+    assign branch_taken = b_ex && (!IRQ_SUPPORT || sram_ready);
+
+    condition_check irq_return_condition (
+        .cond(instruction_id[31:28]),
+        .status(status_flags_id),
+        .cond_met(irq_cond_met)
+    );
+    assign irq_entry_request = IRQ_SUPPORT && irq_state == IRQ_IDLE &&
+        irq_sync && !system_freeze;
+    assign irq_return_request = IRQ_SUPPORT && irq_state == IRQ_HANDLER &&
+        instruction_id[27:0] == 28'h25ef004 && irq_cond_met &&
+        !system_freeze && !branch_taken;
+    assign irq_hold_fetch = irq_entry_request || irq_return_request ||
+        irq_state == IRQ_DRAIN || irq_state == IRQ_RETURN;
+    // Drain all older side effects before changing register banks or flags.
+    assign irq_pipeline_empty = sram_ready && !wb_en_ex && !mem_r_en_ex &&
+        !mem_w_en_ex && !b_ex && !s_ex && !wb_en_mem && !mem_r_en_mem &&
+        !mem_w_en_mem && !wb_en_mem_wb;
+    assign irq_enter = IRQ_SUPPORT && irq_state == IRQ_DRAIN && irq_pipeline_empty;
+    assign irq_exit = IRQ_SUPPORT && irq_state == IRQ_RETURN && irq_pipeline_empty;
+    assign pc_redirect = irq_enter | irq_exit | branch_taken;
+    assign pc_redirect_addr = irq_enter ? 32'd6 :
+                              irq_exit ? ((irq_lr - 32'd4) >> 2) : branch_addr_exe;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            irq_meta <= 1'b0;
+            irq_sync <= 1'b0;
+            irq_state <= IRQ_IDLE;
+            irq_save_lr <= 1'b0;
+            irq_return_addr <= 32'd0;
+            irq_saved_flags <= 4'd0;
+        end else begin
+            irq_meta <= irq;
+            irq_sync <= irq_meta;
+            irq_save_lr <= 1'b0;
+            case (irq_state)
+                IRQ_IDLE: if (irq_entry_request) irq_state <= IRQ_DRAIN;
+                IRQ_DRAIN: if (irq_enter) begin
+                    irq_return_addr <= (pc_current_if << 2) + 32'd4;
+                    irq_saved_flags <= status_flags_exe;
+                    irq_save_lr <= 1'b1;
+                    irq_state <= IRQ_HANDLER;
+                end
+                IRQ_HANDLER: if (irq_return_request) irq_state <= IRQ_RETURN;
+                IRQ_RETURN: if (irq_exit) irq_state <= IRQ_IDLE;
+                default: irq_state <= IRQ_IDLE;
+            endcase
+        end
+    end
 
     id_ex_reg id_ex_reg_inst (
         .clk(clk),
@@ -188,8 +267,10 @@ module arm_core #(
         .imm(imm_ex),
         .shift_operand(shift_operand_ex),
         .signed_imm_24(signed_imm_24_ex),
-        .s(s_ex),
+        .s(s_ex & (!IRQ_SUPPORT || !freeze_all_stages)),
         .sr(sr_ex),
+        .restore_flags(irq_exit),
+        .saved_flags(irq_saved_flags),
         .alu_result(alu_result_ex),
         .branch_addr(branch_addr_exe),
         .status_out(status_flags_exe),
@@ -197,7 +278,6 @@ module arm_core #(
     );
 
     // EX/MEM Pipeline Register
-    wire wb_en_mem, mem_r_en_mem, mem_w_en_mem;
     wire [3:0] dest_mem, sr_val_mem;
     wire [31:0] val_rm_mem;
 
@@ -285,7 +365,7 @@ module arm_core #(
         .mem_dest(dest_mem),
         .exe_mem_r_en(mem_r_en_ex),
         .forwarding_en(forwarding_en),
-        .hazard_detected(hazard_stall)
+        .hazard_detected(hazard_detected)
     );
 
     forwarding_unit forwarding_unit_inst (

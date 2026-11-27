@@ -19,6 +19,10 @@ module id_stage #(
     input  wire [3:0]  dest_wb,
     input  wire        hazard,
     input  wire [3:0]  sr,
+    input  wire        irq_mode,
+    input  wire        irq_save_lr,
+    input  wire [31:0] irq_return_addr,
+    output wire [31:0] irq_lr,
 
     output wire        wb_en,
     output wire        mem_r_en,
@@ -84,8 +88,12 @@ module id_stage #(
         .dest_wb(dest_wb),
         .result_wb(result_wb),
         .write_back_en(write_back_en),
+        .irq_mode(irq_mode),
+        .irq_save_lr(irq_save_lr),
+        .irq_return_addr(irq_return_addr),
         .reg1(val_rn),
-        .reg2(val_rm)
+        .reg2(val_rm),
+        .irq_lr(irq_lr)
     );
 
     // Controller

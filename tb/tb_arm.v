@@ -37,6 +37,8 @@ module tb_arm;
         .clk(clk),
         .rst(rst),
         .forwarding_en(forwarding_en),
+        .irq(1'b0),
+        .irq_active(),
         .instruction_in(instruction),
         .pc_out(pc),
         .sram_addr(sram_addr),

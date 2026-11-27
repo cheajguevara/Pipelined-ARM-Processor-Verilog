@@ -12,6 +12,7 @@ module if_stage (
     input  wire        clk,
     input  wire        rst,
     input  wire        freeze,
+    input  wire        hold_fetch,
     input  wire        branch_taken,
     input  wire [31:0] branch_addr,
     output wire [31:0] pc_current,
@@ -35,7 +36,7 @@ module if_stage (
     pc pc_register (
         .clk(clk),
         .rst(rst),
-        .freeze(freeze),
+        .freeze(freeze | (hold_fetch & ~branch_taken)),
         .pc_in(next_pc),
         .pc_out(pc_current)
     );

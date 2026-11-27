@@ -24,6 +24,8 @@ module ex_stage #(
     input  wire [31:0] signed_imm_24,
     input  wire        s,
     input  wire [3:0]  sr,
+    input  wire        restore_flags,
+    input  wire [3:0]  saved_flags,
 
     output wire [31:0] alu_result,
     output wire [31:0] branch_addr,
@@ -67,6 +69,8 @@ module ex_stage #(
         .rst(rst),
         .s_en(s),
         .status_in(status_next),
+        .restore(restore_flags),
+        .restored_status(saved_flags),
         .status_out(status_out)
     );
 endmodule
