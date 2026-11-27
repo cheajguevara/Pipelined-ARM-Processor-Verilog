@@ -1,3 +1,5 @@
+# **Design Prepared for Release to JP and Team**
+
 # 5-Stage Pipelined ARM Processor in Verilog HDL
 ### Hardware Implementation with Dynamic Forwarding, Hazard Detection, and Multi-Cycle SRAM Controller
 
@@ -6,9 +8,8 @@
 [![FPGA Target](https://img.shields.io/badge/FPGA-Xilinx%20Zynq--7000%20(XC7Z010)-orange.svg)](https://www.xilinx.com/products/silicon-devices/soc/zynq-7000.html)
 [![Synthesis](https://img.shields.io/badge/Synthesis-Vivado%20Verified-brightgreen.svg)](#fpga-implementation--synthesis-results)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Institution](https://img.shields.io/badge/University%20of%20Tehran-ECE%20Department-003366.svg)](https://ece.ut.ac.ir/)
 
-A high-performance, synthesizable **32-bit 5-Stage Pipelined RISC Processor** implementing an **ARMv4T-compatible integer instruction set** in Verilog HDL. Designed and verified as part of the **Computer Architecture Laboratory** at the **Department of Electrical and Computer Engineering, University of Tehran**, supervised by **Dr. Saeed Safari**.
+A high-performance, synthesizable **32-bit 5-Stage Pipelined RISC Processor** implementing an **ARMv4T-compatible integer instruction set** in Verilog HDL.
 
 The core features full hardware handling of structural, data, and control hazards via a **Dynamic Operand Forwarding Unit** (zero-bubble bypassing from EX/MEM and MEM/WB stages) and a **Load-Use Hazard Detection Unit**. To interface with narrow physical memories, a multi-cycle **SRAM Controller FSM** transparently serializes 32-bit word transactions into 4 sequential 8-bit byte bursts with automated pipeline freezing. Physical implementation of the full board wrapper (`ARM_wrapper`, including the processor core, VIO core, and debouncer) on a **Xilinx Zynq-7000 SoC (XC7Z010)** uses **1,567 Slice LUTs (8.90%)**, **1,152 Slice Flip-Flops (3.27%)**, and **0.50 BRAM tiles (0.83%)**.
 
@@ -29,8 +30,7 @@ The core features full hardware handling of structural, data, and control hazard
 - [FPGA Implementation & Synthesis Results](#fpga-implementation--synthesis-results)
 - [Repository Structure](#repository-structure)
 - [Verification & Simulation Guide](#verification--simulation-guide)
-- [خلاصه معماری به زبان فارسی (Persian Overview)](#خلاصه-معماری-به-زبان-فارسی-persian-overview)
-- [Author & License](#author--license)
+- [Architecture Overview](#architecture-overview)
 
 ---
 
@@ -644,42 +644,47 @@ forwarding_en = 1; // 1 = Dynamic Forwarding Enabled (200 cycles / 437 cycles)
 
 ---
 
-## خلاصه معماری به زبان فارسی (Persian Overview)
+## Architecture Overview
 
-<div dir="rtl" align="right">
+### Five-Stage Pipelined ARM Processor in Verilog HDL
 
-### پیاده‌سازی سخت‌افزاری پردازنده ۵ طبقه‌ای خط‌لوله‌ای ARM در زبان Verilog HDL
+This repository contains the design, cycle-accurate verification, and physical
+implementation of a 32-bit, five-stage pipelined processor implementing an
+ARMv4T-compatible instruction subset.
 
-این مخزن شامل طراحی کامل، اعتبارسنجی چرخه‌دقیق و پیاده‌سازی فیزیکی یک پردازنده ۳۲ بیتی با معماری خط‌لوله‌ای (۵ طبقه‌ای) سازگار با مجموعه دستورات **ARMv4T** می‌باشد که در آزمایشگاه معماری کامپیوتر دانشکده مهندسی برق و کامپیوتر **دانشگاه تهران** تحت نظارت **دکتر سعید صفری** پیاده‌سازی شده است.
+#### Technical Highlights
 
-#### ویژگی‌های برجسته فنی:
-۱. **پایپ‌لاین ۵ طبقه‌ای استاندارد RISC**: شامل طبقات واکشی دستور (`IF`)، دیکود و خواندن از رجیستر فایل (`ID`)، اجرا و محاسبات آریتمتیک (`EX`)، دسترسی به حافظه (`MEM`)، و بازنویسی در رجیستر فایل (`WB`).
-۲. **واحد فورواردینگ پویا (Forwarding Unit)**: حذف کامل حباب‌های خط‌لوله ناشی از مخاطرات داده‌ای RAW با ارسال مستقیم نتایج از خروجی مراحل EX/MEM و MEM/WB به ورودی‌های ALU با اولویت‌بندی داینامیک.
-۳. **واحد تشخیص و مدیریت مخاطره (Hazard Detection Unit)**: تشخیص هوشمند مخاطره Load-Use (وابستگی داده‌ای به دستور LDR) و توقف خط‌لوله (Freeze) به مدت ۱ سیکل به همراه تزریق حباب NOP.
-۴. **کنترلر حافظه خارجی چندسیکلی SRAM**: طراحی ماشین حالت متناهی (FSM) سه‌وضعیته به منظور تبدیل دسترسی‌های کلمه‌ای ۳۲ بیتی به ۴ بایت متوالی بر روی باس داده ۸ بیتی حافظه فیزیکی به همراه پروتکل Handshake و فریز خودکار پردازنده.
-۵. **رجیستر فایل بانک‌شده ۱۶ در ۳۲ بیتی**: خواندن غیرهمگام با دو پورت مستقل و نوشتن در لبه پایین‌رونده کلاک (`negedge`) جهت جلوگیری از مخاطرات ساختاری و تداخل همزمان خواندن و نوشتن.
-۶. **پشتیبانی کامل از شروط دستوری ARM**: ارزیابی بلادرنگ ۱۵ کد شرطی ARM با توجه به ۴ بیت پرچم وضعیت (`Z, C, N, V`).
+1. **Five-stage RISC pipeline**: Instruction fetch (`IF`), decode and register
+   read (`ID`), execution (`EX`), memory access (`MEM`), and write-back (`WB`).
+2. **Dynamic forwarding**: Forwards results from EX/MEM and MEM/WB to ALU
+   inputs to resolve read-after-write data hazards.
+3. **Hazard detection**: Detects load-use dependencies, freezes the pipeline
+   for one cycle, and inserts a NOP bubble.
+4. **Multi-cycle SRAM controller**: Uses a three-state FSM to split 32-bit
+   accesses into four bytes on an 8-bit bus, with handshaking and pipeline
+   freezing.
+5. **Banked 16-by-32-bit register file**: Provides two asynchronous read ports
+   and falling-edge writes.
+6. **ARM condition evaluation**: Evaluates 15 condition codes using the
+   `Z`, `C`, `N`, and `V` status flags.
 
-#### نتایج ارزیابی و بنچ‌مارک شبیه‌سازی (۴۷ دستورالعمل):
-- **حافظه ایده‌آل تک‌سیکلی بدون فورواردینگ**: ۲۹۲ سیکل ($\text{CPI} = 6.213$)
-- **حافظه ایده‌آل تک‌سیکلی با فورواردینگ**: ۲۰۰ سیکل ($\text{CPI} = 4.255$) $\leftarrow$ **۳۱.۵۱٪ بهبود سرعت (Speedup)**
-- **حافظه چندسیکلی SRAM بدون فورواردینگ**: ۵۲۹ سیکل ($\text{CPI} = 11.255$)
-- **حافظه چندسیکلی SRAM با فورواردینگ**: ۴۳۷ سیکل ($\text{CPI} = 9.298$) $\leftarrow$ **۱۷.۳۹٪ بهبود سرعت (Speedup)**
+#### Reported Simulation Benchmarks (47 Instructions)
 
-#### نتایج سنتز سخت‌افزاری روی تراشه FPGA (Xilinx Zynq-7000 - `ARM_wrapper`):
-- **تعداد Slice LUTs مصرفی**: ۱,۵۶۷ از ۱۷,۶۰۰ (۸.۹۰٪ کل تراشه - شامل ۱,۴۵۸ LUT برای هسته `ARM_inst`، ۱۰۲ LUT برای `VIO` و ۷ LUT برای `deb_inst`)
-- **تعداد Slice Registers (FFs)**: ۱,۱۵۲ از ۳۵,۲۰۰ (۳.۲۷٪ - شامل ۹۰۴ FF در هسته `ARM_inst`، ۲۳۱ در `VIO` و ۱۷ در `deb_inst`)
-- **حافظه Block RAM مصرفی**: ۰.۵۰ تایل از ۶۰ (۰.۸۳٪ - مربوط به هسته `ARM_inst`)
-- **تعداد پین‌های I/O**: ۲ از ۱۰۰ (۲.۰۰٪)
+- **Ideal single-cycle memory, without forwarding**: 292 cycles ($\text{CPI} = 6.213$)
+- **Ideal single-cycle memory, with forwarding**: 200 cycles ($\text{CPI} = 4.255$); 31.51% cycle reduction
+- **Multi-cycle SRAM, without forwarding**: 529 cycles ($\text{CPI} = 11.255$)
+- **Multi-cycle SRAM, with forwarding**: 437 cycles ($\text{CPI} = 9.298$); 17.39% cycle reduction
 
-</div>
+#### Historical FPGA Results (Xilinx Zynq-7000, `ARM_wrapper`)
+
+- **Slice LUTs**: 1,567 of 17,600 (8.90%): 1,458 for `ARM_inst`, 102 for `VIO`, and 7 for `deb_inst`.
+- **Slice registers**: 1,152 of 35,200 (3.27%): 904 for `ARM_inst`, 231 for `VIO`, and 17 for `deb_inst`.
+- **Block RAM**: 0.50 of 60 tiles (0.83%), attributed to `ARM_inst`.
+- **I/O pins**: 2 of 100 (2.00%).
 
 ---
 
-## Author & License
+阿杰·库马尔·达什与吉特哈布代码助手合作开发了此设计，仍需进一步研究。
 
-- **Author**: [Alireza Najafi Motiei](https://github.com/alirezanmotiei)
-- **Affiliation**: Department of Electrical and Computer Engineering, University of Tehran
-- **Course**: Computer Architecture Laboratory
-- **Supervisor**: Dr. Saeed Safari
-- **License**: Distributed under the terms of the [MIT License](LICENSE).
+🎸 ✈️ 🇨🇳 ❤️ 😴 😴
+
